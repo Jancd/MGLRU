@@ -1,0 +1,194 @@
+use crate::std_impl::MglruCache as StdCache;
+use crate::no_std_impl::MglruCache as NoStdCache;
+
+#[test]
+fn std_basic_insert_and_get() {
+    let mut cache = StdCache::new(4);
+    cache.insert(1, "one");
+    cache.insert(2, "two");
+    cache.insert(3, "three");
+    assert_eq!(cache.get(&1), Some(&"one"));
+    assert_eq!(cache.get(&2), Some(&"two"));
+    assert_eq!(cache.get(&3), Some(&"three"));
+    assert_eq!(cache.len(), 3);
+}
+
+#[test]
+fn std_eviction_removes_oldest_gen_tail() {
+    let mut cache = StdCache::new(3);
+    cache.insert(1, "a");
+    cache.insert(2, "b");
+    cache.insert(3, "c");
+    // Age everything into older generations.
+    cache.age();
+    cache.age();
+    cache.age();
+    // Insert a 4th item; should evict 1 (oldest gen tail).
+    cache.insert(4, "d");
+    assert!(!cache.contains_key(&1));
+    assert!(cache.contains_key(&2));
+    assert!(cache.contains_key(&3));
+    assert!(cache.contains_key(&4));
+}
+
+#[test]
+fn std_access_promotes() {
+    let mut cache = StdCache::new(3);
+    cache.insert(1, "a");
+    cache.insert(2, "b");
+    cache.insert(3, "c");
+    cache.age(); // all move to gen 1
+    // Access key 1 → promotes back to gen 0
+    cache.get(&1);
+    cache.age(); // gen 0 → gen 1, gen 1 → gen 2
+    cache.age(); // gen 1 → gen 2, gen 2 → gen 3
+    // Now 2 and 3 are in gen 3, key 1 is in gen 2.
+    // Evict should remove 2 or 3 (oldest gen tail), not 1.
+    cache.insert(4, "d");
+    assert!(cache.contains_key(&1));
+    assert!(cache.contains_key(&4));
+    assert_eq!(cache.len(), 3);
+}
+
+#[test]
+fn std_update_existing_key() {
+    let mut cache = StdCache::new(4);
+    assert_eq!(cache.insert(1, "old"), None);
+    assert_eq!(cache.insert(1, "new"), Some("old"));
+    assert_eq!(cache.get(&1), Some(&"new"));
+    assert_eq!(cache.len(), 1);
+}
+
+#[test]
+fn std_remove() {
+    let mut cache = StdCache::new(4);
+    cache.insert(1, "a");
+    cache.insert(2, "b");
+    assert_eq!(cache.remove(&1), Some("a"));
+    assert!(!cache.contains_key(&1));
+    assert_eq!(cache.len(), 1);
+    assert_eq!(cache.remove(&1), None);
+}
+
+#[test]
+fn std_age_shifts_generations() {
+    let mut cache = StdCache::new(8);
+    cache.insert(1, "a");
+    cache.insert(2, "b");
+    cache.age();
+    cache.age();
+    cache.age();
+    // After 3 ages, both should be in gen 3 (max).
+    // They should still be retrievable.
+    assert_eq!(cache.get(&1), Some(&"a"));
+    assert_eq!(cache.get(&2), Some(&"b"));
+}
+
+// ---- no_std impl tests ----
+
+#[test]
+fn nostd_basic_insert_and_get() {
+    let mut cache = NoStdCache::<i32, &str, 4>::new();
+    cache.insert(1, "one");
+    cache.insert(2, "two");
+    cache.insert(3, "three");
+    assert_eq!(cache.get(&1), Some(&"one"));
+    assert_eq!(cache.get(&2), Some(&"two"));
+    assert_eq!(cache.get(&3), Some(&"three"));
+    assert_eq!(cache.len(), 3);
+}
+
+#[test]
+fn nostd_eviction_removes_oldest_gen_tail() {
+    let mut cache = NoStdCache::<i32, &str, 3>::new();
+    cache.insert(1, "a");
+    cache.insert(2, "b");
+    cache.insert(3, "c");
+    cache.age();
+    cache.age();
+    cache.age();
+    cache.insert(4, "d");
+    assert!(!cache.contains_key(&1));
+    assert!(cache.contains_key(&2));
+    assert!(cache.contains_key(&3));
+    assert!(cache.contains_key(&4));
+}
+
+#[test]
+fn nostd_access_promotes() {
+    let mut cache = NoStdCache::<i32, &str, 3>::new();
+    cache.insert(1, "a");
+    cache.insert(2, "b");
+    cache.insert(3, "c");
+    cache.age();
+    cache.get(&1);
+    cache.age();
+    cache.age();
+    cache.insert(4, "d");
+    assert!(cache.contains_key(&1));
+    assert!(cache.contains_key(&4));
+    assert_eq!(cache.len(), 3);
+}
+
+#[test]
+fn nostd_update_existing_key() {
+    let mut cache = NoStdCache::<i32, &str, 4>::new();
+    assert_eq!(cache.insert(1, "old"), None);
+    assert_eq!(cache.insert(1, "new"), Some("old"));
+    assert_eq!(cache.get(&1), Some(&"new"));
+    assert_eq!(cache.len(), 1);
+}
+
+#[test]
+fn nostd_remove() {
+    let mut cache = NoStdCache::<i32, &str, 4>::new();
+    cache.insert(1, "a");
+    cache.insert(2, "b");
+    assert_eq!(cache.remove(&1), Some("a"));
+    assert!(!cache.contains_key(&1));
+    assert_eq!(cache.len(), 1);
+    assert_eq!(cache.remove(&1), None);
+}
+
+#[test]
+fn nostd_age_shifts_generations() {
+    let mut cache = NoStdCache::<i32, &str, 8>::new();
+    cache.insert(1, "a");
+    cache.insert(2, "b");
+    cache.age();
+    cache.age();
+    cache.age();
+    assert_eq!(cache.get(&1), Some(&"a"));
+    assert_eq!(cache.get(&2), Some(&"b"));
+}
+
+#[test]
+fn std_heavy_churn() {
+    let mut cache = StdCache::new(16);
+    for i in 0..1000 {
+        cache.insert(i, i * 10);
+        if i % 7 == 0 {
+            cache.age();
+        }
+    }
+    assert_eq!(cache.len(), 16);
+    // The most recently inserted keys should be present.
+    for i in 984..1000 {
+        assert!(cache.contains_key(&i));
+    }
+}
+
+#[test]
+fn nostd_heavy_churn() {
+    let mut cache = NoStdCache::<i32, i32, 16>::new();
+    for i in 0..1000 {
+        cache.insert(i, i * 10);
+        if i % 7 == 0 {
+            cache.age();
+        }
+    }
+    assert_eq!(cache.len(), 16);
+    for i in 984..1000 {
+        assert!(cache.contains_key(&i));
+    }
+}
