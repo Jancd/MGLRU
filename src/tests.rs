@@ -192,3 +192,68 @@ fn nostd_heavy_churn() {
         assert!(cache.contains_key(&i));
     }
 }
+
+#[test]
+fn nostd_remove_insert_reuse_slots() {
+    let mut cache = NoStdCache::<i32, i32, 32>::new();
+
+    for i in 0..32 {
+        cache.insert(i, i);
+    }
+    for i in 0..16 {
+        assert_eq!(cache.remove(&i), Some(i));
+    }
+    for i in 100..116 {
+        cache.insert(i, i * 2);
+    }
+
+    assert_eq!(cache.len(), 32);
+    for i in 0..16 {
+        assert!(!cache.contains_key(&i));
+    }
+    for i in 16..32 {
+        assert!(cache.contains_key(&i));
+    }
+    for i in 100..116 {
+        assert_eq!(cache.get(&i), Some(&(i * 2)));
+    }
+}
+
+#[test]
+#[should_panic]
+fn nostd_zero_capacity_panics() {
+    let _ = NoStdCache::<i32, i32, 0>::new();
+}
+
+#[test]
+fn nostd_capacity_one_edge_behavior() {
+    let mut cache = NoStdCache::<i32, i32, 1>::new();
+
+    assert_eq!(cache.capacity(), 1);
+    assert!(cache.is_empty());
+
+    assert_eq!(cache.insert(1, 10), None);
+    assert_eq!(cache.len(), 1);
+    assert_eq!(cache.get(&1), Some(&10));
+
+    assert_eq!(cache.insert(1, 11), Some(10));
+    assert_eq!(cache.get(&1), Some(&11));
+
+    cache.age();
+    cache.age();
+    assert_eq!(cache.get(&1), Some(&11));
+
+    assert_eq!(cache.insert(2, 20), None);
+    assert_eq!(cache.len(), 1);
+    assert!(!cache.contains_key(&1));
+    assert_eq!(cache.get(&2), Some(&20));
+
+    assert_eq!(cache.remove(&2), Some(20));
+    assert_eq!(cache.len(), 0);
+    assert!(cache.is_empty());
+    assert_eq!(cache.remove(&2), None);
+
+    assert_eq!(cache.insert(3, 30), None);
+    assert_eq!(cache.len(), 1);
+    assert_eq!(cache.get(&3), Some(&30));
+}

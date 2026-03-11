@@ -30,7 +30,11 @@ pub struct MglruCache<K, V, const CAP: usize> {
     entries: [Option<Entry<K, V>>; CAP],
     generations: [Generation; MAX_GENERATIONS],
     count: usize,
-    hash_buckets: [usize; CAP],
+    hash_buckets_lo: [usize; CAP],
+    hash_buckets_hi: [usize; CAP],
+    free_list: [usize; CAP],
+    free_len: usize,
+    next_unused: usize,
 }
 
 impl<K: Clone + Eq + Hash, V, const CAP: usize> MglruCache<K, V, CAP> {
@@ -45,7 +49,11 @@ impl<K: Clone + Eq + Hash, V, const CAP: usize> MglruCache<K, V, CAP> {
                 Generation::empty(),
             ],
             count: 0,
-            hash_buckets: [NONE; CAP],
+            hash_buckets_lo: [NONE; CAP],
+            hash_buckets_hi: [NONE; CAP],
+            free_list: [NONE; CAP],
+            free_len: 0,
+            next_unused: 0,
         }
     }
 
@@ -94,7 +102,7 @@ impl<K: Clone + Eq + Hash, V, const CAP: usize> MglruCache<K, V, CAP> {
             next: NONE,
         });
         self.count += 1;
-        self.hash_insert(idx, &key);
+        self.hash_insert_idx(idx);
         self.push_front(0, idx);
         None
     }
@@ -103,9 +111,10 @@ impl<K: Clone + Eq + Hash, V, const CAP: usize> MglruCache<K, V, CAP> {
         let idx = self.find_index(key)?;
         let g = self.entries[idx].as_ref().unwrap().generation;
         self.unlink(g, idx);
-        self.hash_remove(key);
+        self.hash_remove_idx(idx);
         let entry = self.entries[idx].take().unwrap();
         self.count -= 1;
+        self.free_slot(idx);
         Some(entry.value)
     }
 
@@ -167,23 +176,31 @@ impl<K: Clone + Eq + Hash, V, const CAP: usize> MglruCache<K, V, CAP> {
         for g in (0..MAX_GENERATIONS).rev() {
             if self.generations[g].tail != NONE {
                 let tail = self.generations[g].tail;
-                let key = self.entries[tail].as_ref().unwrap().key.clone();
-                self.hash_remove(&key);
+                self.hash_remove_idx(tail);
                 self.unlink(g, tail);
                 self.entries[tail] = None;
                 self.count -= 1;
+                self.free_slot(tail);
                 return;
             }
         }
     }
 
-    fn alloc_slot(&self) -> usize {
-        for i in 0..CAP {
-            if self.entries[i].is_none() {
-                return i;
-            }
+    fn alloc_slot(&mut self) -> usize {
+        if self.free_len > 0 {
+            self.free_len -= 1;
+            return self.free_list[self.free_len];
         }
-        unreachable!()
+        debug_assert!(self.next_unused < CAP);
+        let idx = self.next_unused;
+        self.next_unused += 1;
+        idx
+    }
+
+    fn free_slot(&mut self, idx: usize) {
+        debug_assert!(self.free_len < CAP);
+        self.free_list[self.free_len] = idx;
+        self.free_len += 1;
     }
 
     fn push_front(&mut self, g: usize, idx: usize) {
@@ -231,6 +248,26 @@ impl<K: Clone + Eq + Hash, V, const CAP: usize> MglruCache<K, V, CAP> {
         key.hash_value()
     }
 
+    fn hash_capacity() -> usize {
+        CAP * 2
+    }
+
+    fn hash_bucket_get(&self, bucket: usize) -> usize {
+        if bucket < CAP {
+            self.hash_buckets_lo[bucket]
+        } else {
+            self.hash_buckets_hi[bucket - CAP]
+        }
+    }
+
+    fn hash_bucket_set(&mut self, bucket: usize, value: usize) {
+        if bucket < CAP {
+            self.hash_buckets_lo[bucket] = value;
+        } else {
+            self.hash_buckets_hi[bucket - CAP] = value;
+        }
+    }
+
     fn find_index(&self, key: &K) -> Option<usize> {
         self.find_index_const(key)
     }
@@ -239,9 +276,10 @@ impl<K: Clone + Eq + Hash, V, const CAP: usize> MglruCache<K, V, CAP> {
         if CAP == 0 {
             return None;
         }
-        let mut bucket = Self::hash_of(key) % CAP;
-        for _ in 0..CAP {
-            let slot = self.hash_buckets[bucket];
+        let hash_cap = Self::hash_capacity();
+        let mut bucket = Self::hash_of(key) % hash_cap;
+        for _ in 0..hash_cap {
+            let slot = self.hash_bucket_get(bucket);
             if slot == NONE {
                 return None;
             }
@@ -250,48 +288,62 @@ impl<K: Clone + Eq + Hash, V, const CAP: usize> MglruCache<K, V, CAP> {
                     return Some(slot);
                 }
             }
-            bucket = (bucket + 1) % CAP;
+            bucket = (bucket + 1) % hash_cap;
         }
         None
     }
 
-    fn hash_insert(&mut self, idx: usize, key: &K) {
-        let mut bucket = Self::hash_of(key) % CAP;
-        loop {
-            if self.hash_buckets[bucket] == NONE {
-                self.hash_buckets[bucket] = idx;
+    fn hash_insert_idx(&mut self, idx: usize) {
+        let hash = {
+            let key = &self.entries[idx].as_ref().unwrap().key;
+            Self::hash_of(key)
+        };
+        let hash_cap = Self::hash_capacity();
+        let mut bucket = hash % hash_cap;
+        for _ in 0..hash_cap {
+            if self.hash_bucket_get(bucket) == NONE {
+                self.hash_bucket_set(bucket, idx);
                 return;
             }
-            bucket = (bucket + 1) % CAP;
+            bucket = (bucket + 1) % hash_cap;
         }
+        unreachable!()
     }
 
-    fn hash_remove(&mut self, key: &K) {
-        let mut bucket = Self::hash_of(key) % CAP;
-        loop {
-            let slot = self.hash_buckets[bucket];
+    fn hash_remove_idx(&mut self, idx: usize) {
+        let hash = {
+            let key = &self.entries[idx].as_ref().unwrap().key;
+            Self::hash_of(key)
+        };
+        let hash_cap = Self::hash_capacity();
+        let mut bucket = hash % hash_cap;
+        for _ in 0..hash_cap {
+            let slot = self.hash_bucket_get(bucket);
             if slot == NONE {
                 return;
             }
-            if let Some(e) = &self.entries[slot] {
-                if e.key == *key {
-                    self.hash_buckets[bucket] = NONE;
-                    let mut next_bucket = (bucket + 1) % CAP;
-                    loop {
-                        let ns = self.hash_buckets[next_bucket];
-                        if ns == NONE {
-                            break;
-                        }
-                        self.hash_buckets[next_bucket] = NONE;
-                        let rehash_key = self.entries[ns].as_ref().unwrap().key.clone();
-                        self.hash_insert(ns, &rehash_key);
-                        next_bucket = (next_bucket + 1) % CAP;
+            if slot == idx {
+                self.hash_bucket_set(bucket, NONE);
+                let mut next_bucket = (bucket + 1) % hash_cap;
+                for _ in 0..hash_cap {
+                    let ns = self.hash_bucket_get(next_bucket);
+                    if ns == NONE {
+                        break;
                     }
-                    return;
+                    self.hash_bucket_set(next_bucket, NONE);
+                    self.hash_insert_idx(ns);
+                    next_bucket = (next_bucket + 1) % hash_cap;
                 }
+                return;
             }
-            bucket = (bucket + 1) % CAP;
+            bucket = (bucket + 1) % hash_cap;
         }
+    }
+}
+
+impl<K: Clone + Eq + Hash, V, const CAP: usize> Default for MglruCache<K, V, CAP> {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
@@ -327,7 +379,7 @@ impl Hash for usize {
     }
 }
 
-impl<'a> Hash for &'a str {
+impl Hash for &str {
     fn hash_value(&self) -> usize {
         let mut h: usize = 5381;
         for b in self.bytes() {
