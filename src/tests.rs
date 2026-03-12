@@ -1,5 +1,15 @@
 use crate::std_impl::MglruCache as StdCache;
 use crate::no_std_impl::MglruCache as NoStdCache;
+use crate::no_std_impl::Hash as NoStdHash;
+
+#[derive(Debug, PartialEq, Eq)]
+struct NoStdConstHashKey(i32);
+
+impl NoStdHash for NoStdConstHashKey {
+    fn hash_value(&self) -> usize {
+        14
+    }
+}
 
 #[test]
 fn std_basic_insert_and_get() {
@@ -256,4 +266,26 @@ fn nostd_capacity_one_edge_behavior() {
     assert_eq!(cache.insert(3, 30), None);
     assert_eq!(cache.len(), 1);
     assert_eq!(cache.get(&3), Some(&30));
+}
+
+#[test]
+fn nostd_remove_cluster_wraparound_integrity() {
+    let mut cache = NoStdCache::<NoStdConstHashKey, i32, 8>::new();
+
+    for i in 0..8 {
+        cache.insert(NoStdConstHashKey(i), i * 10);
+    }
+
+    assert_eq!(cache.remove(&NoStdConstHashKey(3)), Some(30));
+    assert_eq!(cache.remove(&NoStdConstHashKey(6)), Some(60));
+
+    for i in [0, 1, 2, 4, 5, 7] {
+        assert_eq!(cache.get(&NoStdConstHashKey(i)), Some(&(i * 10)));
+    }
+
+    assert_eq!(cache.insert(NoStdConstHashKey(100), 1000), None);
+    assert_eq!(cache.insert(NoStdConstHashKey(101), 1010), None);
+    assert_eq!(cache.len(), 8);
+    assert_eq!(cache.get(&NoStdConstHashKey(100)), Some(&1000));
+    assert_eq!(cache.get(&NoStdConstHashKey(101)), Some(&1010));
 }

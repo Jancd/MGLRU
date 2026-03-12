@@ -3,6 +3,7 @@ const MAX_GENERATIONS: usize = 4;
 struct Entry<K, V> {
     key: K,
     value: V,
+    hash: usize,
     generation: usize,
     prev: usize,
     next: usize,
@@ -37,7 +38,7 @@ pub struct MglruCache<K, V, const CAP: usize> {
     next_unused: usize,
 }
 
-impl<K: Clone + Eq + Hash, V, const CAP: usize> MglruCache<K, V, CAP> {
+impl<K: Eq + Hash, V, const CAP: usize> MglruCache<K, V, CAP> {
     pub fn new() -> Self {
         assert!(CAP > 0);
         Self {
@@ -93,10 +94,12 @@ impl<K: Clone + Eq + Hash, V, const CAP: usize> MglruCache<K, V, CAP> {
             self.evict();
         }
 
+        let hash = Self::hash_of(&key);
         let idx = self.alloc_slot();
         self.entries[idx] = Some(Entry {
-            key: key.clone(),
+            key,
             value,
+            hash,
             generation: 0,
             prev: NONE,
             next: NONE,
@@ -276,15 +279,16 @@ impl<K: Clone + Eq + Hash, V, const CAP: usize> MglruCache<K, V, CAP> {
         if CAP == 0 {
             return None;
         }
+        let hash = Self::hash_of(key);
         let hash_cap = Self::hash_capacity();
-        let mut bucket = Self::hash_of(key) % hash_cap;
+        let mut bucket = hash % hash_cap;
         for _ in 0..hash_cap {
             let slot = self.hash_bucket_get(bucket);
             if slot == NONE {
                 return None;
             }
             if let Some(e) = &self.entries[slot] {
-                if e.key == *key {
+                if e.hash == hash && e.key == *key {
                     return Some(slot);
                 }
             }
@@ -294,10 +298,7 @@ impl<K: Clone + Eq + Hash, V, const CAP: usize> MglruCache<K, V, CAP> {
     }
 
     fn hash_insert_idx(&mut self, idx: usize) {
-        let hash = {
-            let key = &self.entries[idx].as_ref().unwrap().key;
-            Self::hash_of(key)
-        };
+        let hash = self.entries[idx].as_ref().unwrap().hash;
         let hash_cap = Self::hash_capacity();
         let mut bucket = hash % hash_cap;
         for _ in 0..hash_cap {
@@ -310,11 +311,16 @@ impl<K: Clone + Eq + Hash, V, const CAP: usize> MglruCache<K, V, CAP> {
         unreachable!()
     }
 
+    fn probe_distance(hash_cap: usize, home: usize, pos: usize) -> usize {
+        if pos >= home {
+            pos - home
+        } else {
+            pos + hash_cap - home
+        }
+    }
+
     fn hash_remove_idx(&mut self, idx: usize) {
-        let hash = {
-            let key = &self.entries[idx].as_ref().unwrap().key;
-            Self::hash_of(key)
-        };
+        let hash = self.entries[idx].as_ref().unwrap().hash;
         let hash_cap = Self::hash_capacity();
         let mut bucket = hash % hash_cap;
         for _ in 0..hash_cap {
@@ -323,16 +329,22 @@ impl<K: Clone + Eq + Hash, V, const CAP: usize> MglruCache<K, V, CAP> {
                 return;
             }
             if slot == idx {
-                self.hash_bucket_set(bucket, NONE);
-                let mut next_bucket = (bucket + 1) % hash_cap;
+                let mut hole = bucket;
+                let mut scan = (bucket + 1) % hash_cap;
                 for _ in 0..hash_cap {
-                    let ns = self.hash_bucket_get(next_bucket);
+                    let ns = self.hash_bucket_get(scan);
                     if ns == NONE {
+                        self.hash_bucket_set(hole, NONE);
                         break;
                     }
-                    self.hash_bucket_set(next_bucket, NONE);
-                    self.hash_insert_idx(ns);
-                    next_bucket = (next_bucket + 1) % hash_cap;
+                    let home = self.entries[ns].as_ref().unwrap().hash % hash_cap;
+                    let dist_scan = Self::probe_distance(hash_cap, home, scan);
+                    let dist_hole = Self::probe_distance(hash_cap, home, hole);
+                    if dist_hole < dist_scan {
+                        self.hash_bucket_set(hole, ns);
+                        hole = scan;
+                    }
+                    scan = (scan + 1) % hash_cap;
                 }
                 return;
             }
@@ -341,7 +353,7 @@ impl<K: Clone + Eq + Hash, V, const CAP: usize> MglruCache<K, V, CAP> {
     }
 }
 
-impl<K: Clone + Eq + Hash, V, const CAP: usize> Default for MglruCache<K, V, CAP> {
+impl<K: Eq + Hash, V, const CAP: usize> Default for MglruCache<K, V, CAP> {
     fn default() -> Self {
         Self::new()
     }

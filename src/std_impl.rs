@@ -39,7 +39,7 @@ impl<K: Clone + Eq + std::hash::Hash, V> MglruCache<K, V> {
         assert!(capacity > 0);
         Self {
             entries: Vec::with_capacity(capacity),
-            free_list: Vec::new(),
+            free_list: Vec::with_capacity(capacity),
             map: HashMap::with_capacity(capacity),
             generations: [
                 Generation::new(),
